@@ -15,7 +15,7 @@ class StandardLLGAuctionConfig:
     """Configuration for standard LLG auction environment"""
     bidder_configs: List[StandardLLGBidderConfig]
     num_items: int = 2
-    max_rounds: int = 20
+    max_rounds: int = 100
     price_options: List[float] = None
 
 def create_standard_llg_config():
@@ -52,7 +52,7 @@ def create_standard_llg_config():
             )
         ],
         num_items=2,
-        max_rounds=20,
+        max_rounds=100,
         price_options=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     )
 

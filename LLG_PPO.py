@@ -1,19 +1,105 @@
 from stable_baselines3 import PPO
-from LLG_ENV import StandardLLGAuctionEnv
-from LLG_config import get_standard_llg_config
+from stable_baselines3.common.callbacks import BaseCallback
+from cont_env import ContinuousLLGAuctionEnv
+from cont_config import get_continuous_llg_config
+from norm_wrapper import ActionNormalizationWrapper
 import numpy as np
 from collections import defaultdict
+import wandb
 
-def train_standard_llg(timesteps=10000, **hyperparams):
+
+class WandbCallback(BaseCallback):
     """
-    Train PPO on standard LLG environment
+    Custom callback to log PPO training metrics to WandB
+    """
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        
+    def _on_step(self) -> bool:
+        # Log episode metrics when episode ends
+        # Check if any episode finished in this step
+        if len(self.locals.get('dones', [])) > 0 and self.locals['dones'][0]:
+            # Get info dict which contains episode statistics
+            infos = self.locals.get('infos', [])
+            if len(infos) > 0 and 'episode' in infos[0]:
+                # stable-baselines3 automatically tracks episode stats in Monitor wrapper
+                episode_info = infos[0]['episode']
+                wandb.log({
+                    "episode/reward": episode_info['r'],
+                    "episode/length": episode_info['l'],
+                    "episode/time": episode_info['t']
+                })
+        
+        return True
     
-    Metrics:
-    1. Clearing rate: % of instances where clearing prices are found within max_rounds
-    2. Average rounds to clear: Mean rounds needed, computed only over cleared instances
+    def _on_rollout_end(self) -> None:
+        """Log training metrics after each rollout"""
+        # Access the logger which contains all training metrics
+        if len(self.logger.name_to_value) > 0:
+            # Log all available training metrics
+            metrics_to_log = {}
+            
+            # Core PPO metrics
+            if 'train/value_loss' in self.logger.name_to_value:
+                metrics_to_log['train/value_loss'] = self.logger.name_to_value['train/value_loss']
+            if 'train/policy_gradient_loss' in self.logger.name_to_value:
+                metrics_to_log['train/policy_loss'] = self.logger.name_to_value['train/policy_gradient_loss']
+            if 'train/entropy_loss' in self.logger.name_to_value:
+                metrics_to_log['train/entropy_loss'] = self.logger.name_to_value['train/entropy_loss']
+            if 'train/approx_kl' in self.logger.name_to_value:
+                metrics_to_log['train/approx_kl'] = self.logger.name_to_value['train/approx_kl']
+            if 'train/clip_fraction' in self.logger.name_to_value:
+                metrics_to_log['train/clip_fraction'] = self.logger.name_to_value['train/clip_fraction']
+            if 'train/explained_variance' in self.logger.name_to_value:
+                metrics_to_log['train/explained_variance'] = self.logger.name_to_value['train/explained_variance']
+            if 'train/learning_rate' in self.logger.name_to_value:
+                metrics_to_log['train/learning_rate'] = self.logger.name_to_value['train/learning_rate']
+            
+            # Log to wandb
+            if metrics_to_log:
+                wandb.log(metrics_to_log)
+
+def train_continuous_llg(timesteps=10000, use_normalization=True, **hyperparams):
     """
-    config = get_standard_llg_config()
-    env = StandardLLGAuctionEnv(config)
+    Train PPO on continuous LLG environment with proper WandB tracking
+    
+    Args:
+        timesteps: Total training timesteps
+        use_normalization: Whether to use action normalization wrapper
+        **hyperparams: PPO hyperparameters
+    
+    Tracks:
+    - Value loss, Policy loss, Entropy
+    - Episode rewards
+    - Custom clearing rate metrics
+    """
+    config = get_continuous_llg_config()
+    
+    # Create continuous environment
+    continuous_env = ContinuousLLGAuctionEnv(config)
+    
+    # Optionally wrap with normalization
+    if use_normalization:
+        env = ActionNormalizationWrapper(continuous_env)
+        env_type = "continuous_normalized"
+    else:
+        env = continuous_env
+        env_type = "continuous_raw"
+
+    # Initialize wandb
+    wandb.init(
+        project="llg-auction",
+        name=f"{env_type}-{timesteps//1000}k-steps",
+        config={
+            "timesteps": timesteps,
+            "env_type": env_type,
+            "use_normalization": use_normalization,
+            "action_space": str(env.action_space),
+            "observation_space": str(env.observation_space),
+            "price_range": f"[{config.min_price}, {config.max_price}]",
+            **hyperparams
+        }
+    )
     
     # Default hyperparameters for PPO
     default_params = {
@@ -25,21 +111,23 @@ def train_standard_llg(timesteps=10000, **hyperparams):
         'clip_range': 0.2,
         'ent_coef': 0.01,
         'vf_coef': 0.5,
-        'verbose': 0
+        'verbose': 1  # Changed to 1 to see training progress
     }
     
-    # Update with any provided hyperparameters
     params = {**default_params, **hyperparams}
     
     print("=" * 50)
-    print("STANDARD LLG TRAINING")
+    print(f"{env_type.upper()} LLG TRAINING")
     print("=" * 50)
     print(f"Training for {timesteps:,} timesteps")
-    print(f"Action space: Discrete {env.action_space}")
-    print(f"Price options: {env.price_options}")
+    print(f"Action space: {env.action_space}")
+    if use_normalization:
+        print(f"Normalized: [-1, 1] → [{config.min_price}, {config.max_price}]")
     print("Progress evaluations:")
     
+    # Create model with WandB callback
     model = PPO("MlpPolicy", env, **params)
+    callback = WandbCallback()
     
     # Train with periodic evaluation
     eval_points = [0.25, 0.5, 0.75, 1.0]
@@ -49,7 +137,11 @@ def train_standard_llg(timesteps=10000, **hyperparams):
         steps_to_train = int(timesteps * checkpoint) - (int(timesteps * eval_points[i-1]) if i > 0 else 0)
         
         if steps_to_train > 0:
-            model.learn(total_timesteps=steps_to_train, reset_num_timesteps=False)
+            model.learn(
+                total_timesteps=steps_to_train, 
+                reset_num_timesteps=False,
+                callback=callback
+            )
         
         # Evaluation
         cleared_instances = 0
@@ -61,8 +153,9 @@ def train_standard_llg(timesteps=10000, **hyperparams):
         for _ in range(eval_episodes):
             obs, info = env.reset()
             
-            # Determine scenario: global_low ($4) vs global_high ($10)
-            global_val = info['valuations'][2]
+            # Get valuations from unwrapped environment
+            valuations = env.unwrapped.bidder_valuations
+            global_val = valuations[2]
             scenario = 'global_low' if global_val == 4 else 'global_high'
             
             rounds = 0
@@ -74,7 +167,7 @@ def train_standard_llg(timesteps=10000, **hyperparams):
                 rounds += 1
                 done = terminated or truncated
             
-            # Track results - only count as cleared if successful within max_rounds
+            # Track results
             instance_cleared = info['successful_allocation']
             if instance_cleared:
                 cleared_instances += 1
@@ -92,7 +185,17 @@ def train_standard_llg(timesteps=10000, **hyperparams):
         
         print(f"  {checkpoint*100:3.0f}%: Clearing Rate {clearing_rate:5.1f}% ({cleared_instances}/{eval_episodes}) | Avg Rounds to Clear {avg_rounds_to_clear:.2f}")
         
-        # Show detailed breakdown at final checkpoint
+        # Log to wandb
+        wandb.log({
+            "eval/training_progress": checkpoint,
+            "eval/clearing_rate": clearing_rate,
+            "eval/cleared_instances": cleared_instances,
+            "eval/avg_rounds_to_clear": avg_rounds_to_clear,
+            "eval/total_episodes": eval_episodes,
+            **{f"eval/allocation_{k}": v/eval_episodes*100 for k, v in allocation_types.items()}
+        })
+        
+        # Detailed breakdown at final checkpoint
         if checkpoint == 1.0:
             print(f"\n    Allocation types:")
             for alloc_type, count in allocation_types.items():
@@ -100,221 +203,32 @@ def train_standard_llg(timesteps=10000, **hyperparams):
                 print(f"      {alloc_type}: {pct:.1f}%")
             
             print(f"\n    Performance by scenario:")
+            scenario_breakdown = {}
             for scenario, results in scenario_results.items():
                 if results['total'] > 0:
                     scenario_clearing_rate = results['cleared'] / results['total'] * 100
                     scenario_avg_rounds = np.mean(results['rounds_cleared']) if results['rounds_cleared'] else 0
                     scenario_desc = "Global=$4" if scenario == 'global_low' else "Global=$10"
                     print(f"      {scenario_desc}: {scenario_clearing_rate:.1f}% cleared ({results['cleared']}/{results['total']}) | Avg rounds: {scenario_avg_rounds:.1f}")
+                    
+                    scenario_breakdown[f"eval/final_{scenario}_clearing_rate"] = scenario_clearing_rate
+                    scenario_breakdown[f"eval/final_{scenario}_avg_rounds"] = scenario_avg_rounds
+            
+            wandb.log(scenario_breakdown)
     
-    model_path = "standard_llg_ppo_model"
+    model_path = f"{env_type}_llg_ppo_model"
     model.save(model_path)
     print(f"\n✅ Training complete! Model saved to {model_path}")
     
+    # Log model as artifact
+    model_artifact = wandb.Artifact("llg_ppo_model", type="model")
+    model_artifact.add_file(f"{model_path}.zip")
+    wandb.log_artifact(model_artifact)
+    
+    wandb.finish()
     return model
 
-def analyze_standard_llg_policy(model_path=None, episodes=1000):
-    """
-    Analyze learned standard LLG PPO policy
-    
-    Comprehensive evaluation over 1000 episodes:
-    1. Clearing rate: % of instances where clearing prices are found within max_rounds
-    2. Average rounds to clear: Mean rounds needed, computed only over cleared instances
-    3. Action-observation correspondence analysis
-    """
-    
-    # Load model and environment
-    if model_path is None:
-        model_path = "standard_llg_ppo_model"
-    
-    model = PPO.load(model_path)
-    config = get_standard_llg_config()
-    env = StandardLLGAuctionEnv(config)
-    
-    print("=" * 60)
-    print("STANDARD LLG POLICY ANALYSIS")
-    print("=" * 60)
-    print(f"Model: {model_path}")
-    print(f"Evaluation episodes: {episodes}")
-    
-    # Track comprehensive metrics
-    action_patterns = defaultdict(int)
-    successful_patterns = defaultdict(int)
-    scenario_actions = defaultdict(lambda: defaultdict(int))
-    observation_action_pairs = defaultdict(lambda: defaultdict(int))
-    
-    # Metrics tracking
-    cleared_instances = 0
-    total_rounds_cleared_only = 0
-    allocation_types = defaultdict(int)
-    scenario_results = defaultdict(lambda: {'cleared': 0, 'total': 0, 'rounds_cleared': []})
-    episode_details = []
-    
-    # Run episodes and collect data
-    for episode in range(episodes):
-        obs, info = env.reset()
-        valuations = info['valuations']
-        global_val = valuations[2]
-        scenario = 'global_low' if global_val == 4 else 'global_high'
-        
-        step = 0
-        done = False
-        episode_steps = []
-        
-        while not done and step < config.max_rounds:
-            action, _ = model.predict(obs, deterministic=True)
-            
-            # Convert action to prices
-            prices = [env.price_options[action[i]] for i in range(config.num_items)]
-            price_a, price_b = prices[0], prices[1]
-            total_price = price_a + price_b
-            
-            # Store step details
-            step_info = {
-                'obs': obs.copy(),
-                'action': action.copy(),
-                'price_a': price_a,
-                'price_b': price_b,
-                'total_price': total_price
-            }
-            episode_steps.append(step_info)
-            
-            obs, reward, terminated, truncated, info = env.step(action)
-            step += 1
-            done = terminated or truncated
-            
-            # Track action patterns
-            action_key = f"[{action[0]},{action[1]}]"
-            action_patterns[action_key] += 1
-            scenario_actions[scenario][action_key] += 1
-            
-            # Track observation-action correspondence
-            obs_key = f"[{step_info['obs'][0]},{step_info['obs'][1]},{step_info['obs'][2]}]"
-            observation_action_pairs[obs_key][action_key] += 1
-            
-            if done:
-                if info['successful_allocation']:
-                    successful_patterns[action_key] += 1
-                break
-        
-        # Track metrics
-        instance_cleared = info['successful_allocation']
-        if instance_cleared:
-            cleared_instances += 1
-            total_rounds_cleared_only += step
-            scenario_results[scenario]['rounds_cleared'].append(step)
-        
-        allocation_types[info['allocation_type']] += 1
-        scenario_results[scenario]['total'] += 1
-        if instance_cleared:
-            scenario_results[scenario]['cleared'] += 1
-        
-        # Store episode details (save last 10 for detailed output)
-        if episode >= episodes - 10:
-            episode_detail = {
-                'episode': episode,
-                'scenario': scenario,
-                'valuations': valuations,
-                'steps': episode_steps,
-                'rounds': step,
-                'success': instance_cleared,
-                'allocation_type': info['allocation_type'],
-                'final_decisions': info['decisions'],
-                'market_clearing': info['market_clearing'],
-                'revenue': info.get('revenue', 0),
-                'allocation_result': info.get('allocation_result', {})
-            }
-            episode_details.append(episode_detail)
-    
-    # Calculate final metrics
-    clearing_rate = cleared_instances / episodes * 100
-    avg_rounds_to_clear = total_rounds_cleared_only / cleared_instances if cleared_instances > 0 else 0
-    
-    print(f"\n=== FINAL RESULTS ({episodes} episodes) ===")
-    print(f"Clearing Rate: {clearing_rate:.1f}% ({cleared_instances}/{episodes})")
-    print(f"Average Rounds to Clear: {avg_rounds_to_clear:.2f} (excluding failed instances)")
-    
-    print(f"\nAllocation types:")
-    for alloc_type, count in allocation_types.items():
-        pct = count / episodes * 100
-        print(f"  {alloc_type}: {pct:.1f}%")
-    
-    print(f"\nPerformance by scenario:")
-    for scenario, results in scenario_results.items():
-        if results['total'] > 0:
-            scenario_clearing_rate = results['cleared'] / results['total'] * 100
-            scenario_avg_rounds = np.mean(results['rounds_cleared']) if results['rounds_cleared'] else 0
-            scenario_desc = "Global=$4" if scenario == 'global_low' else "Global=$10"
-            print(f"  {scenario_desc}: {scenario_clearing_rate:.1f}% cleared ({results['cleared']}/{results['total']}) | Avg rounds: {scenario_avg_rounds:.1f}")
-    
-    # Action pattern analysis
-    print(f"\n=== ACTION PATTERNS ===")
-    print("Most common actions:")
-    sorted_actions = sorted(action_patterns.items(), key=lambda x: x[1], reverse=True)
-    for action_str, count in sorted_actions[:5]:
-        success_count = successful_patterns.get(action_str, 0)
-        success_rate = (success_count / count * 100) if count > 0 else 0
-        
-        action_idx = eval(action_str)
-        price_a = env.price_options[action_idx[0]]
-        price_b = env.price_options[action_idx[1]]
-        total_price = price_a + price_b
-        
-        print(f"  Action {action_str}: ${price_a}+${price_b}=${total_price} | Used {count} times | {success_rate:.1f}% success")
-    
-    # Observation-action correspondence
-    print(f"\n=== OBSERVATION-ACTION CORRESPONDENCE ===")
-    print("Most common observation-action patterns:")
-    for obs_key, action_dict in observation_action_pairs.items():
-        if sum(action_dict.values()) >= 10:  # Only show frequent patterns
-            most_common_action = max(action_dict, key=action_dict.get)
-            frequency = action_dict[most_common_action]
-            total_for_obs = sum(action_dict.values())
-            percentage = frequency / total_for_obs * 100
-            
-            action_idx = eval(most_common_action)
-            price_a = env.price_options[action_idx[0]]
-            price_b = env.price_options[action_idx[1]]
-            
-            print(f"  Obs {obs_key} → Action {most_common_action} (${price_a}+${price_b}) | {percentage:.1f}% of time ({frequency}/{total_for_obs})")
-    
-    # Show last 10 episodes in detail
-    print(f"\n=== LAST 10 EPISODES DETAILS ===")
-    for episode_detail in episode_details:
-        episode = episode_detail['episode']
-        scenario = episode_detail['scenario']
-        valuations = episode_detail['valuations']
-        rounds = episode_detail['rounds']
-        
-        print(f"Episode {episode}: Scenario {scenario}, Valuations {valuations}")
-        
-        for step_idx, step_info in enumerate(episode_detail['steps']):
-            print(f"  Step {step_idx}: obs={step_info['obs']}, action={step_info['action']} → ${step_info['price_a']}+${step_info['price_b']}=${step_info['total_price']}")
-        
-        if episode_detail['success']:
-            print(f"  → Success! Market cleared in {rounds} rounds, Revenue: ${episode_detail['revenue']}")
-        else:
-            print(f"  → Failed after {rounds} rounds, Type: {episode_detail['allocation_type']}")
-        
-        if episode < episode_details[-1]['episode']:
-            print()
-    
-    return action_patterns, successful_patterns
-
-def run_standard_llg_experiment(timesteps=10000):
-    """Run complete standard LLG experiment: train and analyze"""
-    print("=" * 70)
-    print("STANDARD LLG COMPLETE EXPERIMENT")
-    print("=" * 70)
-    
-    # Train
-    model = train_standard_llg(timesteps=timesteps)
-    
-    # Analyze
-    action_patterns, successful_patterns = analyze_standard_llg_policy(episodes=1000)
-    
-    return model, action_patterns, successful_patterns
 
 if __name__ == "__main__":
-    # Run complete experiment
-    run_standard_llg_experiment(timesteps=100000)
+    # Train with normalization
+    train_continuous_llg(timesteps=2000000, use_normalization=True)
