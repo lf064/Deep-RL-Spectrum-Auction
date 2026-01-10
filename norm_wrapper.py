@@ -2,7 +2,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-class ActionNormalizationWrapper(gym.Wrapper):
+class CATSActionNormalizationWrapper(gym.Wrapper):
     """
     Normalizes action space to [-1, 1] for neural network compatibility.
     
@@ -10,13 +10,13 @@ class ActionNormalizationWrapper(gym.Wrapper):
     1. Denormalizes them to the actual price range [min_price, max_price]
     2. Passes denormalized actions to the underlying environment
     
-    Works ONLY with ContinuousLLGAuctionEnv (not DiscreteLLGWrapper).
+    Works with CATSAuctionEnv (continuous action space with Box actions).
     """
     
     def __init__(self, env):
         """
         Args:
-            env: ContinuousLLGAuctionEnv instance
+            env: CATSAuctionEnv instance
         """
         super().__init__(env)
         
@@ -100,7 +100,8 @@ class ActionNormalizationWrapper(gym.Wrapper):
         # Denormalize action to actual price range
         denormalized_action = self.denormalize_action(normalized_action)
         
-        # Pass to underlying continuous environment
+        # Pass to underlying environment (Monitor wrapper handles reset state)
+        # PPO's vectorized environment will auto-reset if needed
         return self.env.step(denormalized_action)
     
     def reset(self, **kwargs):
@@ -110,28 +111,29 @@ class ActionNormalizationWrapper(gym.Wrapper):
 
 def test_normalization_wrapper():
     """Test the normalization wrapper"""
-    from cont_env import ContinuousLLGAuctionEnv
-    from cont_config import get_continuous_llg_config
+    from cont_env import CATSAuctionEnv
+    from cont_config import get_cats_config
     
-    print("Testing Action Normalization Wrapper")
+    print("Testing CATS Action Normalization Wrapper")
     print("=" * 50)
     
     # Create base environment and wrap it
-    config = get_continuous_llg_config()
-    base_env = ContinuousLLGAuctionEnv(config)
-    wrapped_env = ActionNormalizationWrapper(base_env)
+    config = get_cats_config('0000.txt', num_bidders=3, seed=42)
+    base_env = CATSAuctionEnv(config)
+    wrapped_env = CATSActionNormalizationWrapper(base_env)
     
     print(f"Original action space: {base_env.action_space}")
     print(f"Wrapped action space:  {wrapped_env.action_space}")
     print(f"Price range: ${wrapped_env.min_price} - ${wrapped_env.max_price}")
     
-    # Test denormalization
-    print("\nTesting denormalization:")
+    # Test denormalization (using first few items as examples)
+    num_test_items = min(3, config.num_items)
+    print(f"\nTesting denormalization (using {num_test_items} items as examples):")
     test_normalized_actions = [
-        np.array([-1.0, -1.0], dtype=np.float32),  # Should map to min_price
-        np.array([0.0, 0.0], dtype=np.float32),    # Should map to mid_price
-        np.array([1.0, 1.0], dtype=np.float32),    # Should map to max_price
-        np.array([-0.5, 0.5], dtype=np.float32),   # Mixed values
+        np.array([-1.0] * num_test_items, dtype=np.float32),  # Should map to min_price
+        np.array([0.0] * num_test_items, dtype=np.float32),    # Should map to mid_price
+        np.array([1.0] * num_test_items, dtype=np.float32),    # Should map to max_price
+        np.array([-0.5, 0.0, 0.5][:num_test_items], dtype=np.float32),   # Mixed values
     ]
     
     for norm_action in test_normalized_actions:
@@ -139,12 +141,12 @@ def test_normalization_wrapper():
         print(f"  {norm_action} → {denorm_action}")
     
     # Test round-trip (normalize then denormalize)
-    print("\nTesting round-trip (should get back original):")
+    print(f"\nTesting round-trip (should get back original, using {num_test_items} items):")
+    mid_price = (wrapped_env.min_price + wrapped_env.max_price) / 2.0
     test_prices = [
-        np.array([0.0, 0.0], dtype=np.float32),
-        np.array([7.5, 7.5], dtype=np.float32),
-        np.array([15.0, 15.0], dtype=np.float32),
-        np.array([4.0, 6.0], dtype=np.float32),
+        np.array([wrapped_env.min_price] * num_test_items, dtype=np.float32),
+        np.array([mid_price] * num_test_items, dtype=np.float32),
+        np.array([wrapped_env.max_price] * num_test_items, dtype=np.float32),
     ]
     
     for price in test_prices:
@@ -155,14 +157,18 @@ def test_normalization_wrapper():
     # Test in actual episode
     print("\nTesting in episode:")
     obs, info = wrapped_env.reset(seed=42)
-    print(f"  Valuations: {info['valuations']}")
+    print(f"  Bidders: {len(config.bidder_configs)}, Items: {config.num_items}")
+    print(f"  Valuations: {[b.valuation for b in config.bidder_configs]}")
     
     # Use normalized actions (what NN would output)
-    normalized_action = np.array([0.0, 0.0], dtype=np.float32)  # Mid-range
+    # Create normalized action for all items (mid-range for all)
+    normalized_action = np.zeros(config.num_items, dtype=np.float32)  # Mid-range
     obs, reward, terminated, truncated, info = wrapped_env.step(normalized_action)
     
-    print(f"  Normalized action: {normalized_action}")
-    print(f"  Actual prices set: {info['prices']}")
+    print(f"  Normalized action (first 5): {normalized_action[:5]}")
+    print(f"  Actual prices set (first 5): {info['prices'][:5]}")
+    print(f"  Demands: {info['demands']}")
+    print(f"  Market clearing: {info['market_clearing']}")
     print(f"  Success: {info['successful_allocation']}")
 
 
