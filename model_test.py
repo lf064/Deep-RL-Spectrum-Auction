@@ -5,7 +5,7 @@ from cont_config import get_cats_config
 from norm_wrapper import CATSActionNormalizationWrapper
 
 
-def diagnose_model(model_path='cats_ppo_3b_12i_s42'):
+def diagnose_model(model_path='cats_ppo_3b_12i_s86-resampleTrue'):
     """
     Diagnose why the model isn't finding clearing prices
     """
@@ -22,7 +22,7 @@ def diagnose_model(model_path='cats_ppo_3b_12i_s42'):
         return
     
     # Create environment
-    config = get_cats_config('0000.txt', num_bidders=7, seed=86)
+    config = get_cats_config('0000.txt', num_bidders=3, seed=764)
     env = CATSAuctionEnv(config)
     env = CATSActionNormalizationWrapper(env)
     
@@ -189,4 +189,4 @@ def diagnose_model(model_path='cats_ppo_3b_12i_s42'):
 
 
 if __name__ == "__main__":
-    diagnose_model('cats_ppo_7b_12i_s86')
+    diagnose_model('cats_ppo_3b_12i_s86-resampleTrue')

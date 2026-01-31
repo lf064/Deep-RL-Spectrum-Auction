@@ -11,12 +11,30 @@ class CATSAuctionEnv(gym.Env):
     Now with Bayesian-style two-stage clearing
     """
     
-    def __init__(self, config: CATSAuctionConfig):
+    def __init__(self, config: CATSAuctionConfig, resample_bidders=False, 
+             cats_filepath=None, seed_range=(0, 1000), clearable_seeds_file=None): 
         super().__init__()
         self.config = config
+
+        self.resample_bidders = resample_bidders
+        self.cats_filepath = cats_filepath
+        self.seed_range = seed_range
+
+        if resample_bidders and cats_filepath is None:
+            raise ValueError("Must provide cats_filepath when resample_bidders=True")
+        
         
         assert len(config.bidder_configs) >= 1, "Need at least 1 bidder"
         assert config.num_items >= 1, "Need at least 1 item"
+
+        if clearable_seeds_file is not None:
+            self.clearable_seeds = np.load(clearable_seeds_file)
+            print(f"Loaded {len(self.clearable_seeds)} clearable seeds from {clearable_seeds_file}")
+        else:
+            self.clearable_seeds = None
+        
+        if resample_bidders and cats_filepath is None:
+            raise ValueError("cats_filepath required when resample_bidders=True")
         
         # Action space: continuous price for each item
         self.action_space = spaces.Box(
@@ -41,7 +59,24 @@ class CATSAuctionEnv(gym.Env):
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
+        # resample bidders each episode
+        if self.resample_bidders:
+        # NEW: Sample from clearable seeds if available
+            if self.clearable_seeds is not None:
+                new_seed = np.random.choice(self.clearable_seeds)
+            else:
+                new_seed = np.random.randint(self.seed_range[0], self.seed_range[1])
+            
+            self.config = get_cats_config(
+                filepath=self.cats_filepath,
+                num_bidders=len(self.config.bidder_configs),
+                seed=new_seed
+            )
+            self.bidder_valuations = [b.valuation for b in self.config.bidder_configs]
+            self.bidder_bundles = [set(b.interested_items) for b in self.config.bidder_configs]
+            
+            
+            
         # Reset all state variables
         self.round_number = 0
         self.successful_allocation = False
@@ -326,7 +361,12 @@ def test_bayesian_clearing():
     
     # Load a CATS instance
     config = get_cats_config('0000.txt', num_bidders=3, seed=42)
-    env = CATSAuctionEnv(config)
+    env = CATSAuctionEnv(
+        config,
+        resample_bidders=True,
+        cats_filepath='0000.txt',  
+        seed_range=(0, 1000)
+)
     
     print(f"\n📋 INSTANCE DETAILS (seed=42)")
     print(f"{'─'*80}")

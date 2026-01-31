@@ -8,10 +8,13 @@ import wandb
 
 def train_cats_ppo(
     filepath: str = '0000.txt',
-    num_bidders: int = 3,
+    num_bidders: int = 5,
     timesteps: int = 1000000,
     use_normalization: bool = True,
     seed: int = 42,
+    resample_bidders: bool = True,
+    seed_range: tuple = (0, 1000),
+    clearable_seeds_file: str = None,  # NEW
     eval_freq: int = 50000,  # ADDED: Evaluation frequency in steps
     **hyperparams
 ):
@@ -28,8 +31,16 @@ def train_cats_ppo(
         **hyperparams: PPO hyperparameters override
     """
     # Setup - CATSParser handles its own seeding via seed parameter
+    
     config = get_cats_config(filepath, num_bidders=num_bidders, seed=seed)
-    env = CATSAuctionEnv(config)
+    env = CATSAuctionEnv(
+        config,
+        resample_bidders=True,           # NEW: Enable resampling
+        cats_filepath=filepath,          # NEW: Path for parser
+        seed_range=(0, 1000)   , 
+        clearable_seeds_file=clearable_seeds_file  # NEW
+         # NEW: Seed range
+    )
     
     if use_normalization:
         env = CATSActionNormalizationWrapper(env)
@@ -43,7 +54,7 @@ def train_cats_ppo(
     # WandB setup
     wandb.init(
         project="cats-auction",
-        name=f"{env_type}-{num_bidders}b-{config.num_items}i-{timesteps//1000}k-s{seed}",
+        name=f"{env_type}-{num_bidders}b-{config.num_items}i-{timesteps//1000}k-s{seed}-resample{resample_bidders}",
         config={
             "filepath": filepath,
             "num_bidders": num_bidders,
@@ -105,7 +116,7 @@ def train_cats_ppo(
     )
     
     # Save
-    model_path = f"cats_ppo_{num_bidders}b_{config.num_items}i_s{seed}"
+    model_path = f"cats_ppo_{num_bidders}b_{config.num_items}i_s{seed}-resample{resample_bidders}"
     model.save(model_path)
     
     # Artifact
@@ -123,12 +134,28 @@ def train_cats_ppo(
 
 
 if __name__ == "__main__":
-    # Run experiment
-    train_cats_ppo(
-        filepath='0000.txt',
-        num_bidders=7,
-        timesteps=300000,
-        use_normalization=True,
-        seed=86,
-        eval_freq=50000  # ADDED: Evaluate every 50k steps
-    )
+    experiments = [
+        {'num_bidders': 7, 'timesteps': 4000000, 'clearable_seeds_file': 'clearable_seeds_7b_subgrad.npy'},
+
+    ]
+    
+    for exp in experiments:
+        print(f"\n{'='*70}")
+        print(f"STARTING EXPERIMENT: {exp['num_bidders']} BIDDERS")
+        print(f"{'='*70}\n")
+        
+        train_cats_ppo(
+            filepath='0000.txt',
+            num_bidders=exp['num_bidders'],
+            timesteps=exp['timesteps'],
+            use_normalization=True,
+            resample_bidders=True,      
+            seed_range=(0, 1000),       
+            clearable_seeds_file=exp.get('clearable_seeds_file'),  # Optional
+            seed=86,
+            eval_freq=50000
+        )
+        
+        print(f"\n{'='*70}")
+        print(f"COMPLETED: {exp['num_bidders']} BIDDERS")
+        print(f"{'='*70}\n")

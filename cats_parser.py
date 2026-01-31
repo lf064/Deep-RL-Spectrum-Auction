@@ -49,12 +49,12 @@ class CATSParser:
                 # Parse bid line
                 self._parse_bid_line(line)
         
-        print(f"Parsed {len(self.bidders)} bids from CATS file")
+        #print(f"Parsed {len(self.bidders)} bids from CATS file")
         
         # Count unique bidders
         unique_bidders = len(set(b.bidder_id for b in self.bidders))
-        print(f"Unique bidders: {unique_bidders}")
-        print(f"Goods: {self.num_goods}, Dummy good ID: {self.dummy_good_id}")
+      #  print(f"Unique bidders: {unique_bidders}")
+       # print(f"Goods: {self.num_goods}, Dummy good ID: {self.dummy_good_id}")
         
         return self.bidders
     
