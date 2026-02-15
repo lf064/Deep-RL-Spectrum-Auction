@@ -49,12 +49,8 @@ class CATSParser:
                 # Parse bid line
                 self._parse_bid_line(line)
         
-        #print(f"Parsed {len(self.bidders)} bids from CATS file")
-        
         # Count unique bidders
         unique_bidders = len(set(b.bidder_id for b in self.bidders))
-      #  print(f"Unique bidders: {unique_bidders}")
-       # print(f"Goods: {self.num_goods}, Dummy good ID: {self.dummy_good_id}")
         
         return self.bidders
     
@@ -131,11 +127,13 @@ class CATSParser:
         # Sample n unique bidders
         sampled_bidder_ids = np.random.choice(unique_bidders, size=n, replace=False)
         
-        # For each sampled bidder, pick their first bid
+        # Separate RNG for bid selection — doesn't disturb the main seed state
+        bid_rng = np.random.RandomState(seed)
+        
         sampled = []
         for bidder_id in sampled_bidder_ids:
             bids = bidder_groups[bidder_id]
-            chosen_bid = bids[0]  # CHANGED: Always pick first bid instead of random
+            chosen_bid = bids[bid_rng.randint(len(bids))]  # random pick, isolated RNG
             sampled.append(chosen_bid)
         
         return sampled

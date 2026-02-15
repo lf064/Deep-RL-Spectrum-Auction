@@ -2,44 +2,46 @@ from stable_baselines3 import PPO
 from cont_env import CATSAuctionEnv
 from cont_config import get_cats_config
 from norm_wrapper import CATSActionNormalizationWrapper
-from test_script import CATSEvalCallback  # CHANGED: Import callback instead of wrapper
+from test_script import CATSEvalCallback
 import wandb
 
 
 def train_cats_ppo(
     filepath: str = '0000.txt',
-    num_bidders: int = 5,
-    timesteps: int = 1000000,
+    num_bidders: int = 10,
+    timesteps: int = 5000000,
     use_normalization: bool = True,
     seed: int = 42,
-    resample_bidders: bool = True,
-    seed_range: tuple = (0, 1000),
-    clearable_seeds_file: str = None,  # NEW
-    eval_freq: int = 50000,  # ADDED: Evaluation frequency in steps
+    seed_range: tuple = (0, 10000),
+    eval_freq: int = 50000,
     **hyperparams
 ):
     """
-    Simple PPO training executor
+    PPO training executor for CATS combinatorial auctions.
+    
+    Clearable-seed filtering happens at runtime: each env.reset() samples a
+    random seed, runs the subgradient check, and keeps trying until it finds
+    a clearable instance. Nothing to configure here.
     
     Args:
         filepath: Path to CATS .txt file
         num_bidders: Number of bidders
         timesteps: Total training timesteps
-        use_normalization: Use action normalization
+        use_normalization: Use action normalization wrapper
         seed: Random seed for reproducibility
+        seed_range: Range of seeds the env samples from each reset
         eval_freq: Evaluate every N timesteps
-        **hyperparams: PPO hyperparameters override
+        **hyperparams: PPO hyperparameter overrides
     """
-    # Setup - CATSParser handles its own seeding via seed parameter
-    
+    # Initial config (used for logging and action space setup)
     config = get_cats_config(filepath, num_bidders=num_bidders, seed=seed)
+
+    # Environment — resampling + clearable filtering handled internally
     env = CATSAuctionEnv(
         config,
-        resample_bidders=True,           # NEW: Enable resampling
-        cats_filepath=filepath,          # NEW: Path for parser
-        seed_range=(0, 1000)   , 
-        clearable_seeds_file=clearable_seeds_file  # NEW
-         # NEW: Seed range
+        resample_bidders=True,
+        cats_filepath=filepath,
+        seed_range=seed_range
     )
     
     if use_normalization:
@@ -48,13 +50,10 @@ def train_cats_ppo(
     else:
         env_type = "raw"
     
-   
-    # Evaluation  handled by CATSEvalCallback 
-    
     # WandB setup
     wandb.init(
         project="cats-auction",
-        name=f"{env_type}-{num_bidders}b-{config.num_items}i-{timesteps//1000}k-s{seed}-resample{resample_bidders}",
+        name=f"{env_type}-{num_bidders}b-{config.num_items}i-{timesteps//1000}k-s{seed}",
         config={
             "filepath": filepath,
             "num_bidders": num_bidders,
@@ -62,13 +61,15 @@ def train_cats_ppo(
             "timesteps": timesteps,
             "env_type": env_type,
             "seed": seed,
-            "eval_freq": eval_freq,  # ADDED: Log eval frequency
+            "seed_range": seed_range,
+            "eval_freq": eval_freq,
+            "clearable_seeds": "runtime_subgradient_check",
             "price_range": f"${config.min_price:.2f}-${config.max_price:.2f}",
             **hyperparams
         }
     )
     
-    # PPO hyperparameters - seed parameter handles all internal seeding
+    # PPO hyperparameters
     params = {
         'learning_rate': 3e-4,
         'n_steps': 2048,
@@ -79,7 +80,7 @@ def train_cats_ppo(
         'ent_coef': 0.01,
         'vf_coef': 0.5,
         'verbose': 1,
-        'seed': seed,  # Seeds PPO's internal randomness (numpy, torch, action sampling)
+        'seed': seed,
         **hyperparams
     }
     
@@ -90,14 +91,14 @@ def train_cats_ppo(
     print(f"Config: {filepath} | {num_bidders} bidders, {config.num_items} items")
     print(f"Price range: ${config.min_price:.2f} - ${config.max_price:.2f}")
     print(f"Training: {timesteps:,} timesteps | Seed: {seed}")
-    print(f"Eval freq: Every {eval_freq:,} steps")  # ADDED: Show eval frequency
+    print(f"Seed range: {seed_range} | Eval freq: every {eval_freq:,} steps")
+    print(f"Clearable filtering: runtime subgradient check each reset")
     print("=" * 70)
     
-    # Create model
+    # Model
     model = PPO("MlpPolicy", env, **params)
     
-    # ADDED: Create evaluation callback
-    # This replaces the non-functional CATSTrainingWrapper
+    # Evaluation callback
     eval_callback = CATSEvalCallback(
         eval_env=env,
         config=config,
@@ -107,19 +108,17 @@ def train_cats_ppo(
         verbose=1
     )
     
-    # CHANGED: Train with callback for evaluation
-    # Before: model.learn(total_timesteps=timesteps)
-    # After: model.learn(total_timesteps=timesteps, callback=eval_callback)
+    # Train
     model.learn(
         total_timesteps=timesteps,
-        callback=eval_callback  # Callback handles evaluation during training
+        callback=eval_callback
     )
     
-    # Save
-    model_path = f"cats_ppo_{num_bidders}b_{config.num_items}i_s{seed}-resample{resample_bidders}"
+    # Save model
+    model_path = f"cats_ppo_{num_bidders}b_{config.num_items}i_s{seed}"
     model.save(model_path)
     
-    # Artifact
+    # Log artifact
     artifact = wandb.Artifact(
         f"model_{num_bidders}b_{config.num_items}i_s{seed}", 
         type="model"
@@ -135,8 +134,7 @@ def train_cats_ppo(
 
 if __name__ == "__main__":
     experiments = [
-        {'num_bidders': 7, 'timesteps': 4000000, 'clearable_seeds_file': 'clearable_seeds_7b_subgrad.npy'},
-
+        {'num_bidders': 10, 'timesteps': 5000000},
     ]
     
     for exp in experiments:
@@ -149,9 +147,7 @@ if __name__ == "__main__":
             num_bidders=exp['num_bidders'],
             timesteps=exp['timesteps'],
             use_normalization=True,
-            resample_bidders=True,      
-            seed_range=(0, 1000),       
-            clearable_seeds_file=exp.get('clearable_seeds_file'),  # Optional
+            seed_range=(0, 10000),
             seed=86,
             eval_freq=50000
         )

@@ -27,36 +27,40 @@ class CATSEvalCallback(BaseCallback):
         self.last_eval_step = 0
         
     def _on_step(self) -> bool:
-        # Log training episode metrics when episode ends
-        if self.locals.get('dones', [False])[0]:
-            infos = self.locals.get('infos', [])
-            if infos:
-                info = infos[0]
-                
-                # Episode outcome
-                cleared = info.get('successful_allocation', False)
-                self.recent_successes.append(1 if cleared else 0)
-                
-                # Episode metrics
-                if 'episode' in info:
-                    length = info['episode'].get('l', 0)
-                    reward = info['episode'].get('r', 0)
-                    self.recent_lengths.append(length)
-                    
-                    wandb.log({
-                        'train/episode_reward': reward,
-                        'train/episode_length': length,
-                        'train/episode_cleared': 1 if cleared else 0,
-                    }, step=self.num_timesteps)
-                
-                # Rolling averages (last 100 episodes)
-                if len(self.recent_successes) >= 100:
-                    wandb.log({
-                        'train/rolling_clearing_rate': np.mean(self.recent_successes[-100:]) * 100,
-                        'train/rolling_avg_length': np.mean(self.recent_lengths[-100:]),
-                    }, step=self.num_timesteps)
+        # SB3 stores these in locals after each env step
+        infos = self.locals.get('infos', [{}])
+        dones = self.locals.get('dones', [False])  # SB3 computes this as terminated | truncated
         
-        # Periodic evaluation - FIXED trigger
+        if dones[0] and infos:
+            info = infos[0]
+            
+            cleared = info.get('successful_allocation', False)
+            self.recent_successes.append(1 if cleared else 0)
+            
+            if 'episode' in info:
+                length = info['episode']['l']
+                reward = info['episode']['r']
+            else:
+                length = info.get('round', 0)
+                reward = 1.0 if cleared else -1.0 * info.get('round', 100)
+            
+            self.recent_lengths.append(length)
+            
+            wandb.log({
+                'train/episode_reward': reward,
+                'train/episode_length': length,
+                'train/episode_cleared': 1 if cleared else 0,
+            }, step=self.num_timesteps)
+            
+            # Rolling averages (last 20 episodes)
+            if len(self.recent_successes) >= 20:
+                wandb.log({
+                    'train/rolling_clearing_rate': np.mean(self.recent_successes[-20:]) * 100,
+                    'train/rolling_avg_length': np.mean(self.recent_lengths[-20:]),
+                }, step=self.num_timesteps)
+         
+        
+        # Periodic evaluation
         if self.num_timesteps - self.last_eval_step >= self.eval_freq:
             self._evaluate()
             self.last_eval_step = self.num_timesteps
@@ -124,7 +128,7 @@ class CATSEvalCallback(BaseCallback):
         clearing_rate = cleared / self.n_eval_episodes * 100
         avg_rounds_cleared = total_rounds_cleared / cleared if cleared > 0 else 0
         avg_revenue = total_revenue / cleared if cleared > 0 else 0
-        avg_efficiency = total_efficiency / cleared if cleared > 0 else 0  # FIXED: was 'clead'
+        avg_efficiency = total_efficiency / cleared if cleared > 0 else 0
         progress = self.num_timesteps / self.model._total_timesteps if hasattr(self.model, '_total_timesteps') else 0
         
         # Print
@@ -169,14 +173,33 @@ class CATSEvalCallback(BaseCallback):
     
     def _on_rollout_end(self) -> None:
         """Log training metrics after each rollout"""
-        if len(self.logger.name_to_value) > 0:
-            metrics = {}
-            for key in ['train/value_loss', 'train/policy_gradient_loss',
-                       'train/entropy_loss', 'train/approx_kl',
-                       'train/clip_fraction', 'train/explained_variance']:
-                if key in self.logger.name_to_value:
-                    log_key = key.replace('policy_gradient_loss', 'policy_loss')
-                    metrics[log_key] = self.logger.name_to_value[key]
-            
-            if metrics:
-                wandb.log(metrics, step=self.num_timesteps)
+        # SB3 stores these in name_to_value after each training update,
+        # but they may also be in name_to_count. Check both.
+        metrics = {}
+        
+        key_map = {
+            'train/value_loss': 'train/value_loss',
+            'train/policy_gradient_loss': 'train/policy_loss',
+            'train/entropy_loss': 'train/entropy_loss',
+            'train/approx_kl': 'train/approx_kl',
+            'train/clip_fraction': 'train/clip_fraction',
+            'train/explained_variance': 'train/explained_variance',
+        }
+        
+        for sb3_key, wandb_key in key_map.items():
+            if sb3_key in self.logger.name_to_value:
+                metrics[wandb_key] = self.logger.name_to_value[sb3_key]
+        
+        if metrics:
+            wandb.log(metrics, step=self.num_timesteps)
+        else:
+            # Fallback: pull directly from the model's logger
+            try:
+                for sb3_key, wandb_key in key_map.items():
+                    val = self.model.logger.get_mean(sb3_key)
+                    if val is not None:
+                        metrics[wandb_key] = val
+                if metrics:
+                    wandb.log(metrics, step=self.num_timesteps)
+            except:
+                pass
